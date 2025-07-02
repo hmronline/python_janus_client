@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 from .plugin_base import JanusPlugin
+from .message_transaction import is_subset
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
 from aiortc.contrib.media import MediaPlayer, MediaRecorder
 
@@ -69,6 +70,123 @@ class JanusAudioBridgePlugin(JanusPlugin):
             await self.__pc.setRemoteDescription(
                 RTCSessionDescription(sdp=jsep["sdp"], type=jsep["type"])
             )
+
+    async def send_wrapper(self, message: dict, matcher: dict, jsep: dict = {}) -> dict:
+        def function_matcher(message: dict):
+            return (
+                is_subset(message, matcher)
+                or is_subset(
+                    message,
+                    {
+                        "janus": "success",
+                        "plugindata": {
+                            "plugin": self.name,
+                            "data": {
+                                "videoroom": "event",
+                                "error_code": None,
+                                "error": None,
+                            },
+                        },
+                    },
+                )
+                or is_subset(
+                    message,
+                    {
+                        "janus": "event",
+                        "plugindata": {
+                            "plugin": self.name,
+                            "data": {
+                                "videoroom": "event",
+                                "error_code": None,
+                                "error": None,
+                            },
+                        },
+                    },
+                )
+                or is_subset(message, {"janus": "error", "error": {}})
+            )
+
+        full_message = message
+        if jsep:
+            full_message = {**message, "jsep": jsep}
+
+        message_transaction = await self.send(
+            message=full_message,
+        )
+        response = await message_transaction.get(matcher=function_matcher, timeout=15)
+        await message_transaction.done()
+
+        if is_subset(response, {"janus": "error", "error": {}}):
+            raise Exception(f"Janus error: {response}")
+
+        return response
+
+    async def join(
+        self,
+        room_id: int,
+        display_name: str = "",
+        token: str = None,
+    ) -> bool:
+        """Join a room
+
+        :param room_id: unique ID of the room to join.
+        :param display_name: display name for the participant; optional.
+        :param token: invitation token, in case the room has an ACL; optional.
+
+        :return: True if room is created.
+        """
+
+        body = {
+            "request": "join",
+            "room": room_id,
+            "display": display_name,
+        }
+        if token:
+            body["token"] = token
+        success_matcher = {
+            "janus": "event",
+            "plugindata": {
+                "plugin": self.name,
+                "data": {"audiobridge": "joined", "room": room_id},
+            },
+        }
+
+        response = await self.send_wrapper(
+            message={
+                "janus": "message",
+                "body": body,
+            },
+            matcher=success_matcher,
+        )
+
+        return is_subset(response, success_matcher)
+
+    async def leave(self) -> bool:
+        """Leave the room. Will unpublish if publishing.
+
+        :return: True if successfully leave.
+        """
+
+        success_matcher = {
+            "janus": "event",
+            "plugindata": {
+                "plugin": self.name,
+                "data": {"audiobridge": "left"},
+            },
+        }
+        response = await self.send_wrapper(
+            message={
+                "janus": "message",
+                "body": {
+                    "request": "leave",
+                },
+            },
+            matcher=success_matcher,
+        )
+
+        await self._pc.close()
+
+        return is_subset(response, success_matcher)
 
     async def start(self, play_from: str, record_to: str = ""):
         self.__pc = RTCPeerConnection()

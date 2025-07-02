@@ -9,17 +9,27 @@ format = "%(asctime)s: %(message)s"
 logging.basicConfig(format=format, level=logging.INFO, datefmt="%H:%M:%S")
 logger = logging.getLogger()
 
+JANUS_BASE_URL = "wss://janusmy.josephgetmyip.com/janusbasews/janus"
+JANUS_API_TOKEN = "sosecret"
+ROOM_ID = "1234"
+DISPLAY_NAME = "Test"
 
 async def main():
-    # transport = JanusTransportHTTP(
-    #     uri="https://janusmy.josephgetmyip.com/janusbase/janus"
-    # )
-    session = JanusSession(base_url="wss://janusmy.josephgetmyip.com/janusbasews/janus")
-    # session = JanusSession(base_url="https://janusmy.josephgetmyip.com/janusbase/janus")
+    # Create session
+    session = JanusSession(base_url=JANUS_BASE_URL, token=JANUS_API_TOKEN)
+    logger.info("session created")
 
+    # Create plugin
     plugin_handle = JanusAudioBridgePlugin()
+    logger.info("plugin created")
 
+    # Attach to Janus session
     await plugin_handle.attach(session=session)
+    logger.info("plugin attached")
+
+    # Join Room
+    await plugin_handle.join(ROOM_ID, DISPLAY_NAME)
+    logger.info("room joined")
 
     if os.path.exists("./echo.mp3"):
         os.remove("./echo.mp3")
@@ -35,8 +45,10 @@ async def main():
 
     await plugin_handle.close_stream()
 
+    # Destroy plugin
     await plugin_handle.destroy()
 
+    # Destroy session
     await session.destroy()
 
 
