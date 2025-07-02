@@ -3,6 +3,7 @@ from .admin_monitor import JanusAdminMonitorClient
 from .session import JanusSession, PluginAttachFail
 
 from .plugin_base import JanusPlugin
+from .plugin_audiobridge import JanusAudioBridgePlugin
 from .plugin_echotest import JanusEchoTestPlugin
 from .plugin_video_call import JanusVideoCallPlugin
 from .plugin_video_room import JanusVideoRoomPlugin
