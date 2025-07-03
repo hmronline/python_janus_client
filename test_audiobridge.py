@@ -1,13 +1,7 @@
-import asyncio
-import logging
-import os
-import math
-import av
-import numpy as np
+import asyncio, logging, os, av, math, fractions, numpy as np
 
-# from janus_client.transport import JanusTransportHTTP
 from janus_client import JanusSession, JanusAudioBridgePlugin
-from aiortc import MediaStreamTrack
+from aiortc import RTCPeerConnection, MediaStreamTrack
 from aiortc.contrib.media import MediaPlayer, MediaRecorder
 
 format = "%(asctime)s: %(message)s"
@@ -16,12 +10,13 @@ logger = logging.getLogger()
 
 JANUS_BASE_URL = "wss://somewhere/janus"  # Replace with your Janus server URL
 JANUS_API_TOKEN = "secret_token"  # Replace with your actual token
-ROOM_ID = "1234" # Replace with your actual room ID
+ROOM_ID = "1234"  # Replace with your actual room ID
 DISPLAY_NAME = "Test User"
 PLAY_FROM = "./sample.mp3"  # Path to the audio file to play
 RECORD_TO = "./echo.mp3"  # Path to save the recorded audio
 
 recorder: MediaRecorder = None
+
 
 class SineAudioTrack(MediaStreamTrack):
     kind = "audio"
@@ -31,17 +26,57 @@ class SineAudioTrack(MediaStreamTrack):
         self.sample_rate = sample_rate
         self.frequency = frequency
         self.phase = 0
+        self.samples = 960
+        self._timestamp = 0
 
     async def recv(self):
-        frame = av.AudioFrame(format="s16", layout="mono", samples=960)
-        tone = np.array([
-            int(32767 * math.sin(2 * math.pi * self.frequency * (self.phase + i) / self.sample_rate))
-            for i in range(960)
-        ], dtype=np.int16)
+        frame = av.AudioFrame(format="s16", layout="mono", samples=self.samples)
+        tone = np.array(
+            [
+                int(
+                    32767
+                    * math.sin(
+                        2
+                        * math.pi
+                        * self.frequency
+                        * (self.phase + i)
+                        / self.sample_rate
+                    )
+                )
+                for i in range(self.samples)
+            ],
+            dtype=np.int16,
+        )
         frame.planes[0].update(tone.tobytes())
-        self.phase += 960
+        self.phase += self.samples
         frame.sample_rate = self.sample_rate
+        frame.pts = self._timestamp
+        frame.time_base = fractions.Fraction(1, self.sample_rate)
+        self._timestamp += self.samples
         return frame
+
+
+class SilenceAudioTrack(MediaStreamTrack):
+    kind = "audio"
+
+    def __init__(self):
+        super().__init__()
+        self.sample_rate = 48000
+        self.samples = 960
+        self.channels = 1
+        self._timestamp = 0
+
+    async def recv(self):
+        await asyncio.sleep(self.samples / self.sample_rate)
+        frame = av.AudioFrame(format="s16", layout="mono", samples=self.samples)
+        frame.sample_rate = self.sample_rate
+        frame.pts = self._timestamp
+        frame.time_base = fractions.Fraction(1, self.sample_rate)
+        self._timestamp += self.samples
+        for p in frame.planes:
+            p.update(bytes(self.samples * 2))  # 2 bytes per sample for s16
+        return frame
+
 
 async def FileAudioTrack(play_from: str) -> MediaStreamTrack:
     player = MediaPlayer(play_from)
@@ -51,7 +86,8 @@ async def FileAudioTrack(play_from: str) -> MediaStreamTrack:
         logger.error(f"⚠️ Failed to create audio track from {play_from}")
         return None
 
-async def on_media_receive()-> None:
+
+async def on_media_receive():
     """
     This method will be called when the PC receives media.
     It can be used to start a recorder.
@@ -65,17 +101,21 @@ async def on_media_receive()-> None:
     else:
         logger.info("🔔 Media received callback from plugin!")
 
-async def on_track_created(track: MediaStreamTrack)-> None:
+
+async def on_track_created(pc: RTCPeerConnection, track: MediaStreamTrack):
     """
     This method will be called when the PC receives media.
     It can be used to start a recorder.
     It may be called multiple times with no input.
     """
     global recorder
-    if recorder and track.kind == "audio":
-        recorder.addTrack(track)
+    if track.kind == "audio":
+        logger.info("🔊 Receiving from Janus")
+        if recorder:
+            recorder.addTrack(track)
 
-async def on_stream_ended()-> None:
+
+async def on_stream_ended() -> None:
     """
     This method will be called when the stream ends.
     It can be used to stop the recorder.
@@ -86,24 +126,23 @@ async def on_stream_ended()-> None:
         logger.info(f"✅ Recorder stopped, saved to {RECORD_TO}")
         recorder = None
 
+
 async def main():
     # Create session
     session = JanusSession(base_url=JANUS_BASE_URL, token=JANUS_API_TOKEN)
     logger.info("✅ session created")
 
-    # Create plugin
-    plugin_handle = JanusAudioBridgePlugin(on_media_receive_callback=on_media_receive,
-                                            on_track_created_callback=on_track_created,
-                                            on_stream_ended_callback=on_stream_ended)
-    logger.info("✅ plugin created")
-
-    # Attach to Janus session
+    # Create plugin & attach to Janus session
+    plugin_handle = JanusAudioBridgePlugin(
+        on_media_receive_callback=on_media_receive,
+        on_track_created_callback=on_track_created,
+        on_stream_ended_callback=on_stream_ended,
+    )
     await plugin_handle.attach(session=session)
-    logger.info("✅ plugin attached")
+    logger.info("✅ plugin created & attached")
 
     # Check if room exists
-    room_exists = await plugin_handle.exists(ROOM_ID)
-    if not room_exists:
+    if not await plugin_handle.exists(ROOM_ID):
         logger.error("❌ room does not exist")
         return
     logger.info("✅ room exists")
@@ -116,9 +155,7 @@ async def main():
         os.remove(RECORD_TO)
 
     # Publish our stream
-    await plugin_handle.publish_stream([
-        await FileAudioTrack(play_from=PLAY_FROM)
-    ])
+    await plugin_handle.publish_stream(SineAudioTrack())
     logger.info("✅ stream published")
 
     # Ping Janus to check connection
@@ -127,7 +164,7 @@ async def main():
     # Wait awhile then hangup
     await asyncio.sleep(15)
     await plugin_handle.close_stream()
-        
+
     # Destroy everything
     if recorder:
         await recorder.stop()
@@ -135,6 +172,7 @@ async def main():
     await session.destroy()
 
     logger.info("✅ test completed")
+
 
 if __name__ == "__main__":
     try:

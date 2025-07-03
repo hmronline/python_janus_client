@@ -362,7 +362,7 @@ class JanusAudioBridgePlugin(JanusPlugin):
         """
 
         self._pc = await self.configure_pc_and_create_offer(track=track)
-        self.configure(self._pc)
+        await self.configure(self._pc)
 
     async def close_stream(self):
         """
