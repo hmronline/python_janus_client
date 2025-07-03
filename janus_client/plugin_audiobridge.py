@@ -53,9 +53,9 @@ class JanusAudioBridgePlugin(JanusPlugin):
         if self.__on_track_created_callback:
             # If the callback is async, await it; otherwise, just call it
             if asyncio.iscoroutinefunction(self.__on_track_created_callback):
-                await self.__on_track_created_callback(track)
+                await self.__on_track_created_callback(self._pc, track)
             else:
-                self.__on_track_created_callback(track)
+                self.__on_track_created_callback(self._pc, track)
 
     async def __on_stream_ended(self)-> None:
         logger.info("stream ended")
