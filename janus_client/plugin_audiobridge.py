@@ -1,10 +1,10 @@
 import asyncio
 import logging
+from typing import List
 
 from .plugin_base import JanusPlugin
 from .message_transaction import is_subset
 from aiortc import RTCPeerConnection, MediaStreamTrack
-from aiortc.contrib.media import MediaPlayer, MediaRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -21,39 +21,64 @@ class JanusAudioBridgePlugin(JanusPlugin):
         IDLE = "idle"
 
     __state: State
-    
-    __pc: RTCPeerConnection
-    __recorder: MediaRecorder
     __webrtcup_event: asyncio.Event
 
-    def __init__(self) -> None:
+    def __init__(self, on_media_receive_callback=None,
+                 on_track_created_callback=None,
+                 on_stream_ended_callback=None) -> None:
         super().__init__()
 
         self.__state = self.State.IDLE
         self.__webrtcup_event = asyncio.Event()
+        self.__on_media_receive_callback = on_media_receive_callback
+        self.__on_track_created_callback = on_track_created_callback
+        self.__on_stream_ended_callback = on_stream_ended_callback
 
-    async def __on_media_receive(self):
+    async def __on_media_receive(self)-> None:
         """
         This method will be called when the PC receives media.
         It can be used to start a recorder.
         It may be called multiple times with no input.
         """
-        await self.__recorder.start()
+        logger.info("media received")
+        if self.__on_media_receive_callback:
+            # If the callback is async, await it; otherwise, just call it
+            if asyncio.iscoroutinefunction(self.__on_media_receive_callback):
+                await self.__on_media_receive_callback()
+            else:
+                self.__on_media_receive_callback()
 
-    async def __on_track_created(self, track: MediaStreamTrack):
+    async def __on_track_created(self, track: MediaStreamTrack)-> None:
         logger.info(f"Track {track.kind} created")
-        if track.kind == "audio" and self.__recorder:
-            self.__recorder.addTrack(track)
+        if self.__on_track_created_callback:
+            # If the callback is async, await it; otherwise, just call it
+            if asyncio.iscoroutinefunction(self.__on_track_created_callback):
+                await self.__on_track_created_callback(track)
+            else:
+                self.__on_track_created_callback(track)
+
+    async def __on_stream_ended(self)-> None:
+        logger.info("stream ended")
+        # Stream ended. Ok to close PC multiple times.
+        if self._pc:
+            await self._pc.close()
+        
+        if self.__on_stream_ended_callback:
+            # If the callback is async, await it; otherwise, just call it
+            if asyncio.iscoroutinefunction(self.__on_stream_ended_callback):
+                await self.__on_stream_ended_callback()
+            else:
+                self.__on_stream_ended_callback()
 
     async def wait_webrtcup(self) -> None:
+        logger.info("webrtc up")
         await self.__webrtcup_event.wait()
         self.__webrtcup_event.clear()
 
-    async def on_receive(self, response: dict):
+    async def on_receive(self, response: dict)-> None:
         """
         Handle asynchronous messages
         """
-        
         logger.info(f"on_receive: {response}")
 
         if "jsep" in response:
@@ -95,12 +120,8 @@ class JanusAudioBridgePlugin(JanusPlugin):
                     pass
 
                 if plugin_data["result"] == "done":
-                    # Stream ended. Ok to close PC multiple times.
-                    if self._pc:
-                        await self._pc.close()
-                    # Ok to stop recording multiple times.
-                    if self.__recorder:
-                        await self.__recorder.stop()
+                    self.__on_stream_ended();
+                    self.__state = self.State.IDLE
 
             if "errorcode" in plugin_data:
                 logger.error(f"Plugin Error: {response}")
@@ -185,12 +206,7 @@ class JanusAudioBridgePlugin(JanusPlugin):
             and response["plugindata"]["data"]["exists"]
         )
 
-    async def join(
-        self,
-        room_id: int,
-        display_name: str = "",
-        token: str = None,
-    ) -> bool:
+    async def join(self, room_id: int, display_name: str = "", token: str = None) -> bool:
         """
         Join a room
 
@@ -254,41 +270,27 @@ class JanusAudioBridgePlugin(JanusPlugin):
 
         return is_subset(response, success_matcher)
 
-    async def __create_pc(self, play_from: str, record_to: str = "") -> RTCPeerConnection:
+    async def __configure_pc(self, stream_track: List[MediaStreamTrack] = []) -> RTCPeerConnection:
         """
-        Create a PeerConnection and configure it with media tracks.
+        Configure a PeerConnection with media tracks.
         """
         
-        player = MediaPlayer(play_from)
-
-        # configure media
-        if player and player.audio:
-            self._pc.addTrack(player.audio)
-
-        if record_to:
-            self.__recorder = MediaRecorder(record_to)
-
-            @self._pc.on("track")
-            async def on_track(track: MediaStreamTrack):
-                logger.info("Track %s received" % track.kind)
-                if track.kind == "video":
-                    self.__recorder.addTrack(track)
-                if track.kind == "audio":
-                    self.__recorder.addTrack(track)
-
+        for track in stream_track:
+            self._pc.addTrack(track=track)
+        
         # Must configure on track event before setRemoteDescription
         self._pc.on("track")(self.__on_track_created)
 
         return self._pc
 
-    async def publish_stream(self, play_from: str, record_to: str = ""):
+    async def publish_stream(self, stream_track: List[MediaStreamTrack] = [])-> bool:
         """
         Stream audio to the room
 
         Should already have joined a room before this.
         """
 
-        self._pc = await self.__create_pc(play_from, record_to)
+        self._pc = await self.__configure_pc(stream_track=stream_track)
 
         # create & send offer
         await self._pc.setLocalDescription(await self._pc.createOffer())
@@ -327,7 +329,7 @@ class JanusAudioBridgePlugin(JanusPlugin):
         else:
             return False
 
-    async def close_stream(self):
+    async def close_stream(self)-> None:
         """
         lose stream
 
@@ -335,6 +337,3 @@ class JanusAudioBridgePlugin(JanusPlugin):
         """
         if self._pc:
             await self._pc.close()
-
-        if self.__recorder:
-            await self.__recorder.stop()
