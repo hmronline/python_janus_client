@@ -39,6 +39,7 @@ This client is using `aiortc` for WebRTC communication and subsequently `PyAV` f
   - Configuration related requests
   - Token related requests
 - Support Janus plugins:
+  - AudioBridge plugin
   - EchoTest plugin
   - VideoCall plugin (Please refer to [eg_videocall_in.py](./eg_videocall_in.py) and [eg_videocall_out.py](./eg_videocall_out.py))
   - VideoRoom plugin
