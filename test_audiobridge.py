@@ -1,8 +1,7 @@
 import asyncio, logging, os, av, math, fractions, numpy as np
-
+from aiortc import RTCPeerConnection
+from aiortc.contrib.media import MediaStreamTrack, MediaPlayer, MediaRecorder
 from janus_client import JanusSession, JanusAudioBridgePlugin
-from aiortc import RTCPeerConnection, MediaStreamTrack
-from aiortc.contrib.media import MediaPlayer, MediaRecorder
 
 format = "%(asctime)s: %(message)s"
 logging.basicConfig(format=format, level=logging.INFO, datefmt="%H:%M:%S")
@@ -30,6 +29,7 @@ class SineAudioTrack(MediaStreamTrack):
         self._timestamp = 0
 
     async def recv(self):
+        # logger.info("SineAudioTrack: Generating frame")
         frame = av.AudioFrame(format="s16", layout="mono", samples=self.samples)
         tone = np.array(
             [
@@ -67,6 +67,7 @@ class SilenceAudioTrack(MediaStreamTrack):
         self._timestamp = 0
 
     async def recv(self):
+        # logger.info("SilenceAudioTrack: Generating frame")
         await asyncio.sleep(self.samples / self.sample_rate)
         frame = av.AudioFrame(format="s16", layout="mono", samples=self.samples)
         frame.sample_rate = self.sample_rate
@@ -83,23 +84,8 @@ async def FileAudioTrack(play_from: str) -> MediaStreamTrack:
     if player and player.audio:
         return player.audio
     else:
-        logger.error(f"⚠️ Failed to create audio track from {play_from}")
+        logger.error(f"❌ Failed to create audio track from {play_from}")
         return None
-
-
-async def on_media_receive():
-    """
-    This method will be called when the PC receives media.
-    It can be used to start a recorder.
-    It may be called multiple times with no input.
-    """
-    global recorder
-    if not recorder and RECORD_TO:
-        recorder = MediaRecorder(RECORD_TO)
-        await recorder.start()
-        logger.info(f"✅ Recorder started, saving to {RECORD_TO}")
-    else:
-        logger.info("🔔 Media received callback from plugin!")
 
 
 async def on_track_created(pc: RTCPeerConnection, track: MediaStreamTrack):
@@ -110,12 +96,31 @@ async def on_track_created(pc: RTCPeerConnection, track: MediaStreamTrack):
     """
     global recorder
     if track.kind == "audio":
-        logger.info("🔊 Receiving from Janus")
+        logger.info("🔔 Receiving from Janus")
+        if not recorder and RECORD_TO:
+            if os.path.exists(RECORD_TO):
+                os.remove(RECORD_TO)
+            recorder = MediaRecorder(RECORD_TO)
         if recorder:
+            logger.info("🔊 Adding track to recorder")
             recorder.addTrack(track)
+        else:
+            logger.warning("⚠️ Recorder not initialized when track received")
 
 
-async def on_stream_ended() -> None:
+async def on_media_receive():
+    """
+    This method will be called when the PC receives media.
+    It can be used to start a recorder.
+    It may be called multiple times with no input.
+    """
+    logger.info("🔔 Media received callback from plugin!")
+    if recorder:
+        await recorder.start()
+        logger.info(f"✅ Recorder started, saving to {RECORD_TO}")
+
+
+async def on_stream_ended():
     """
     This method will be called when the stream ends.
     It can be used to stop the recorder.
@@ -125,12 +130,14 @@ async def on_stream_ended() -> None:
         await recorder.stop()
         logger.info(f"✅ Recorder stopped, saved to {RECORD_TO}")
         recorder = None
+    else:
+        logger.warning("⚠️ Recorder not initialized when stream ended")
 
 
 async def main():
     # Create session
     session = JanusSession(base_url=JANUS_BASE_URL, token=JANUS_API_TOKEN)
-    logger.info("✅ session created")
+    logger.info("✅ Session created")
 
     # Create plugin & attach to Janus session
     plugin_handle = JanusAudioBridgePlugin(
@@ -139,39 +146,38 @@ async def main():
         on_stream_ended_callback=on_stream_ended,
     )
     await plugin_handle.attach(session=session)
-    logger.info("✅ plugin created & attached")
+    logger.info("✅ Plugin created & attached")
 
     # Check if room exists
     if not await plugin_handle.exists(ROOM_ID):
         logger.error("❌ room does not exist")
         return
-    logger.info("✅ room exists")
+    logger.info("✅ Room exists")
 
     # Join Room
     await plugin_handle.join(ROOM_ID, DISPLAY_NAME, JANUS_API_TOKEN)
-    logger.info("✅ joined room")
-
-    if os.path.exists(RECORD_TO):
-        os.remove(RECORD_TO)
+    logger.info("✅ Joined room")
 
     # Publish our stream
-    await plugin_handle.publish_stream(SineAudioTrack())
-    logger.info("✅ stream published")
+    await plugin_handle.publish_stream(SilenceAudioTrack())
+    #await plugin_handle.publish_stream(SineAudioTrack())
+    #await plugin_handle.publish_stream(await FileAudioTrack(PLAY_FROM))
+    logger.info("✅ Stream published")
+
+    await plugin_handle.wait_webrtcup()
 
     # Ping Janus to check connection
     await session.transport.ping()
 
     # Wait awhile then hangup
     await asyncio.sleep(15)
-    await plugin_handle.close_stream()
+    await plugin_handle.leave(ROOM_ID)
 
     # Destroy everything
-    if recorder:
-        await recorder.stop()
     await plugin_handle.destroy()
     await session.destroy()
 
-    logger.info("✅ test completed")
+    logger.info("✅ Test completed")
 
 
 if __name__ == "__main__":

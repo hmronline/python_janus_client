@@ -1,5 +1,4 @@
-import asyncio
-import logging
+import asyncio, logging
 
 from .plugin_base import JanusPlugin
 from .message_transaction import is_subset
@@ -43,7 +42,8 @@ class JanusAudioBridgePlugin(JanusPlugin):
         It can be used to start a recorder.
         It may be called multiple times with no input.
         """
-        logger.info("media received")
+        logger.info("Media received")
+
         if self.__on_media_receive_callback:
             # If the callback is async, await it; otherwise, just call it
             if asyncio.iscoroutinefunction(self.__on_media_receive_callback):
@@ -60,8 +60,14 @@ class JanusAudioBridgePlugin(JanusPlugin):
             else:
                 self.__on_track_created_callback(self._pc, track)
 
+    async def __on_state_changed(self):
+        logger.info(f"State changed: {self._pc.connectionState}")
+        if self._pc.connectionState == "closed":
+            await self.__on_stream_ended()
+            self.__state = self.State.IDLE
+
     async def __on_stream_ended(self):
-        logger.info("stream ended")
+        logger.info("Stream ended")
         # Stream ended. Ok to close PC multiple times.
         if self._pc:
             await self._pc.close()
@@ -74,7 +80,7 @@ class JanusAudioBridgePlugin(JanusPlugin):
                 self.__on_stream_ended_callback()
 
     async def wait_webrtcup(self):
-        logger.info("webrtc up")
+        logger.info("WebRTC up")
         await self.__webrtcup_event.wait()
         self.__webrtcup_event.clear()
 
@@ -85,31 +91,30 @@ class JanusAudioBridgePlugin(JanusPlugin):
         logger.info(f"on_receive: {response}")
 
         if "jsep" in response:
+            logger.info(
+                "Received SDP (%s):\n%s",
+                response["jsep"].type,
+                response["jsep"].sdp.replace("\r\n", "\n"),
+            )
             await self.on_receive_jsep(jsep=response["jsep"])
 
         janus_code = response["janus"]
+
+        if janus_code == "webrtcup":
+            self.__webrtcup_event.set()
+            return
 
         if janus_code == "media":
             if response["receiving"]:
                 # It's ok to start multiple times, only the track that
                 # has not been started will start
                 if self.__state == self.State.STREAMING_IN_MEDIA:
-                    self.__on_media_receive()
+                    await self.__on_media_receive()
                 elif self.__state == self.State.IDLE:
                     raise Exception("Media streaming when idle")
-
-        if janus_code == "webrtcup":
-            self.__webrtcup_event.set()
+                return
 
         if janus_code == "event":
-            logger.info(f"Event response: {response}")
-            # if "plugindata" in response:
-            #     if response["plugindata"]["data"]["videoroom"] == "attached":
-            #         # Subscriber attached
-            #         self.joined_event.set()
-            #     elif response["plugindata"]["data"]["videoroom"] == "joined":
-            #         # Participant joined (joined as publisher but may not publish)
-            #         self.joined_event.set()
             plugin_data = response["plugindata"]["data"]
 
             if plugin_data["audiobridge"] != "event":
@@ -122,11 +127,7 @@ class JanusAudioBridgePlugin(JanusPlugin):
                     # Successful start stream request. Do nothing.
                     pass
 
-                if plugin_data["result"] == "done":
-                    self.__on_stream_ended()
-                    self.__state = self.State.IDLE
-
-            if "errorcode" in plugin_data:
+            if "error_code" in plugin_data:
                 logger.error(f"Plugin Error: {response}")
         else:
             logger.info(f"Unimplemented response handle: {response}")
@@ -215,7 +216,7 @@ class JanusAudioBridgePlugin(JanusPlugin):
 
     async def join(
         self,
-        room_id: int,
+        room_id: str,
         display_name: str = "",
         token: str = None,
     ) -> bool:
@@ -254,7 +255,7 @@ class JanusAudioBridgePlugin(JanusPlugin):
 
         return is_subset(response, success_matcher)
 
-    async def leave(self) -> bool:
+    async def leave(self, room_id: str) -> bool:
         """
         Leave the room. Will unpublish if publishing.
 
@@ -265,7 +266,7 @@ class JanusAudioBridgePlugin(JanusPlugin):
             "janus": "event",
             "plugindata": {
                 "plugin": self.name,
-                "data": {"audiobridge": "left"},
+                "data": {"audiobridge": "left", "room": room_id},
             },
         }
         response = await self.__send_wrapper(
@@ -299,10 +300,16 @@ class JanusAudioBridgePlugin(JanusPlugin):
 
         # Create & set offer
         await self._pc.setLocalDescription(await self._pc.createOffer())
+        logger.info(
+            "Generated SDP (%s):\n%s",
+            self._pc.localDescription.type,
+            self._pc.localDescription.sdp.replace("\r\n", "\n"),
+        )
         self.__state = self.State.STREAMING_OUT_MEDIA
 
         # Must configure on track event before setRemoteDescription
         self._pc.on("track")(self.__on_track_created)
+        self._pc.on("connectionstatechange")(self.__on_state_changed)
 
         return self._pc
 
@@ -347,6 +354,7 @@ class JanusAudioBridgePlugin(JanusPlugin):
                     jsep["sdp"].replace("\r\n", "\n"),
                 )
                 await self.on_receive_jsep(jsep=jsep)
+                self.__state = self.State.STREAMING_IN_MEDIA
             else:
                 logger.error("No valid JSEP in Janus response: %s", response)
                 return False
@@ -368,7 +376,7 @@ class JanusAudioBridgePlugin(JanusPlugin):
         """
         Close stream
 
-        This should cause the stream to stop and a done event to be received.
+        This should cause the stream to stop.
         """
         if self._pc:
             await self._pc.close()
